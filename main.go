@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mmcdole/gofeed"
+	"gopkg.in/yaml.v3"
 )
 
 type DiscordWebhookEmbed struct {
@@ -26,49 +28,78 @@ type DiscordWebhook struct {
 	Embeds  []DiscordWebhookEmbed `json:"embeds"`
 }
 
+type Config struct {
+	RSS     []string `yaml:"rss"`
+	Webhook []string `yaml:"webhook"`
+}
+
 const USERAGENT = "Mozilla/5.0 (compatible; tdiary-notifier/0.1; +https://github.com/eniehack/tdiary-notifier)"
 
-func main() {
-	rssURL := os.Getenv("RSS_URL")
-	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+func loadConfig(configPath string) (*Config, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
 
-	if rssURL == "" || webhookURL == "" {
-		log.Fatal("RSS_URL and DISCORD_WEBHOOK_URL environment variables are required")
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	return &config, nil
+}
+
+func main() {
+	var configPath string
+	flag.StringVar(&configPath, "config", "./config.yml", "specify config file's path")
+	flag.Parse()
+
+	config, err := loadConfig(configPath)
+	if err != nil {
+		log.Fatalf("failed to parse config: %v\n", err)
+	}
+	if 1 < len(config.RSS) && 1 < len(config.Webhook) {
+		log.Fatalf("Either rss or webhookURL must be one")
 	}
 
 	// RSS取得
 	feedparser := gofeed.NewParser()
 	feedparser.UserAgent = USERAGENT
-	feed, err := feedparser.ParseURL(rssURL)
-	if err != nil {
-		log.Fatalf("Failed to parse RSS: %v", err)
-	}
 
-	// 今日の日記をチェック
-	today := time.Now().Format("2006-01-02")
-	var todayEntries []*gofeed.Item
-
-	for _, item := range feed.Items {
-		diaryDate, err := extractDateFromURL(item.Link)
+	for _, rssUrl := range config.RSS {
+		feed, err := feedparser.ParseURL(rssUrl)
 		if err != nil {
-			log.Printf("Failed to extract date from URL %s: %v", item.Link, err)
+			log.Fatalf("Failed to parse RSS: %v", err)
+		}
+
+		// 今日の日記をチェック
+		today := time.Now().Format("2006-01-02")
+		var todayEntries []*gofeed.Item
+
+		for _, item := range feed.Items {
+			pubDate, err := time.Parse(time.RFC3339, item.DublinCoreExt.Date[0])
+			if err != nil {
+				log.Printf("failed to parse dc:date: %v", err)
+			}
+			if pubDate.Format("2006-01-02") != today {
+				continue
+			}
+			todayEntries = append(todayEntries, item)
+		}
+
+		if len(todayEntries) == 0 {
+			log.Println("No diary entries for today")
 			continue
 		}
 
-		if diaryDate.Format("2006-01-02") == today {
-			todayEntries = append(todayEntries, item)
+		for _, webhookUrl := range config.Webhook {
+			if err = sendDiscordNotification(webhookUrl, todayEntries); err != nil {
+				log.Fatalf("Failed to send Discord notification: %v", err)
+			}
 		}
 	}
 
-	if len(todayEntries) == 0 {
-		log.Println("No diary entries for today")
-		return
-	}
-
-	// Discord通知送信
-	if err = sendDiscordNotification(webhookURL, todayEntries); err != nil {
-		log.Fatalf("Failed to send Discord notification: %v", err)
-	}
 }
 
 func extractDateFromURL(urlStr string) (time.Time, error) {

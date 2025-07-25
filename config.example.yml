@@ -1,0 +1,5 @@
+rss:
+  - https://example.jp/diary/rss
+webhook:
+  - https://discord.com/webhook/invalid
+  - https://discord.com/webhook/example
